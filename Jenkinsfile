@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    DOCKERHUB_USERNAME = "saksar762@gmail.com"   // 👈 change this
+    DOCKERHUB_USERNAME = "saksar762@gmail.com"     // 👈 your Docker Hub username
     IMAGE_TAG          = "${BUILD_NUMBER}"
     KUBE_NAMESPACE     = "online-boutique"
   }
@@ -23,63 +23,23 @@ pipeline {
     }
 
     /* =========================
-       Stage 2: Select Services (Build ALL)
+       Stage 2: Select Services
        ========================= */
     stage('Select Services') {
       steps {
         script {
-          env.CHANGED_SERVICES = sh(
+          env.SERVICES = sh(
             script: "ls src",
             returnStdout: true
           ).trim().split("\n").join(",")
 
-          echo "Services selected: ${env.CHANGED_SERVICES}"
+          echo "Services: ${env.SERVICES}"
         }
       }
     }
 
     /* =========================
-       Stage 3: Build & Test (Parallel)
-       ========================= */
-    stage('Build & Test') {
-      steps {
-        script {
-          def branches = [:]
-
-          env.CHANGED_SERVICES.split(",").each { svc ->
-            branches[svc] = {
-              stage("Build & Test: ${svc}") {
-                dir("src/${svc}") {
-
-                  if (fileExists("go.mod")) {
-                    sh "go test ./..."
-                  }
-                  else if (fileExists("package.json")) {
-                    sh "npm install"
-                    sh "npm test || true"
-                  }
-                  else if (fileExists("requirements.txt")) {
-                    sh "pip install -r requirements.txt"
-                  }
-                  else if (fileExists("pom.xml")) {
-                    sh "mvn test"
-                  }
-                  else {
-                    echo "No build tool detected for ${svc}"
-                  }
-
-                }
-              }
-            }
-          }
-
-          parallel branches
-        }
-      }
-    }
-
-    /* =========================
-       Stage 4: Docker Build & Push
+       Stage 3: Docker Build & Push
        ========================= */
     stage('Docker Build & Push') {
       steps {
@@ -92,9 +52,12 @@ pipeline {
           sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
 
           script {
-            env.CHANGED_SERVICES.split(",").each { svc ->
+            env.SERVICES.split(",").each { svc ->
               sh """
-                docker build -t ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG} src/${svc}
+                docker build \
+                  -t ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG} \
+                  src/${svc}
+
                 docker push ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}
               """
             }
@@ -104,13 +67,13 @@ pipeline {
     }
 
     /* =========================
-       Stage 5: Deploy to GKE
+       Stage 4: Deploy to GKE
        ========================= */
     stage('Deploy to GKE') {
       steps {
         withCredentials([file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')]) {
           script {
-            env.CHANGED_SERVICES.split(",").each { svc ->
+            env.SERVICES.split(",").each { svc ->
               sh """
                 sed -i '/image:/c\\  image: ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}' \
                 kubernetes-manifests/${svc}.yaml
@@ -124,7 +87,7 @@ pipeline {
     }
 
     /* =========================
-       Stage 6: Validate
+       Stage 5: Validate
        ========================= */
     stage('Validate') {
       steps {
