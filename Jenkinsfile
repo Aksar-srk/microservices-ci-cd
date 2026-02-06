@@ -5,9 +5,6 @@ pipeline {
     DOCKERHUB_USERNAME = "aksarsr"
     IMAGE_TAG          = "${BUILD_NUMBER}"
     KUBE_NAMESPACE     = "online-boutique"
-
-    // 🔥 REQUIRED for Online Boutique Dockerfiles
-    DOCKER_BUILDKIT    = "1"
   }
 
   options {
@@ -26,15 +23,15 @@ pipeline {
     }
 
     /* =========================
-       Stage 2: Select Services
+       Stage 2: Detect Services
        ========================= */
-    stage('Select Services') {
+    stage('Detect Services') {
       steps {
         script {
           env.SERVICES = sh(
             script: "ls src",
             returnStdout: true
-          ).trim().split("\n").join(",")
+          ).trim().replaceAll("\\s+", ",")
 
           echo "Services detected: ${env.SERVICES}"
         }
@@ -42,7 +39,7 @@ pipeline {
     }
 
     /* =========================
-       Stage 3: Docker Build & Push
+       Stage 3: Docker Build & Push (BUILDx ONLY)
        ========================= */
     stage('Docker Build & Push') {
       steps {
@@ -54,22 +51,29 @@ pipeline {
           )
         ]) {
 
-          // ✅ SAFE docker login (no Groovy interpolation)
           sh '''
+            set -e
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+            # Create builder if not exists
+            docker buildx inspect jenkins-builder >/dev/null 2>&1 || \
+              docker buildx create --name jenkins-builder --use
+
+            docker buildx use jenkins-builder
           '''
 
           script {
             env.SERVICES.split(",").each { svc ->
               sh """
-                echo "Building image for ${svc}"
+                echo "=============================="
+                echo "Building & pushing ${svc}"
+                echo "=============================="
 
-                docker build \
-                  --platform=linux/amd64 \
+                docker buildx build \
+                  --platform linux/amd64 \
+                  --push \
                   -t ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG} \
                   src/${svc}
-
-                docker push ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}
               """
             }
           }
@@ -87,6 +91,7 @@ pipeline {
         ]) {
 
           sh '''
+            set -e
             kubectl get ns ${KUBE_NAMESPACE} || kubectl create ns ${KUBE_NAMESPACE}
           '''
 
