@@ -2,11 +2,9 @@ pipeline {
   agent any
 
   environment {
-    REGISTRY_URL    = "docker.io"
-    IMAGE_NAMESPACE = "online-boutique"
-    IMAGE_TAG       = "${BUILD_NUMBER}"
-    KUBE_NAMESPACE  = "default"
-    CHANGED_SERVICES = ""
+    DOCKERHUB_USERNAME = "saksar762@gmail.com"   // 👈 change this
+    IMAGE_TAG          = "${BUILD_NUMBER}"
+    KUBE_NAMESPACE     = "online-boutique"
   }
 
   options {
@@ -25,52 +23,25 @@ pipeline {
     }
 
     /* =========================
-       Stage 2: Detect Changed Services
+       Stage 2: Select Services (Build ALL)
        ========================= */
-    stage('Detect Changes') {
+    stage('Select Services') {
       steps {
         script {
-          def services = []
+          env.CHANGED_SERVICES = sh(
+            script: "ls src",
+            returnStdout: true
+          ).trim().split("\n").join(",")
 
-          if (env.BUILD_NUMBER == "1") {
-            echo "First build detected — building all services"
-            services = sh(
-              script: "ls src",
-              returnStdout: true
-            ).trim().split("\n")
-          } else {
-            def changedFiles = sh(
-              script: "git diff --name-only HEAD~1 HEAD || true",
-              returnStdout: true
-            ).trim().split("\n")
-
-            changedFiles.each { file ->
-              if (file.startsWith("src/")) {
-                services << file.split("/")[1]
-              }
-            }
-          }
-
-          services = services.unique().findAll { it }
-
-          if (services.isEmpty()) {
-            echo "No service changes detected. Pipeline will exit successfully."
-            env.CHANGED_SERVICES = ""
-          } else {
-            env.CHANGED_SERVICES = services.join(",")
-            echo "Services to build: ${env.CHANGED_SERVICES}"
-          }
+          echo "Services selected: ${env.CHANGED_SERVICES}"
         }
       }
     }
 
     /* =========================
-       Stage 3: Build & Test
+       Stage 3: Build & Test (Parallel)
        ========================= */
     stage('Build & Test') {
-      when {
-        expression { env.CHANGED_SERVICES?.trim() }
-      }
       steps {
         script {
           def branches = [:]
@@ -94,7 +65,7 @@ pipeline {
                     sh "mvn test"
                   }
                   else {
-                    echo "No build tool for ${svc}"
+                    echo "No build tool detected for ${svc}"
                   }
 
                 }
@@ -111,37 +82,42 @@ pipeline {
        Stage 4: Docker Build & Push
        ========================= */
     stage('Docker Build & Push') {
-      when {
-        expression { env.CHANGED_SERVICES?.trim() }
-      }
       steps {
-        script {
-          env.CHANGED_SERVICES.split(",").each { svc ->
-            sh """
-              docker build -t ${REGISTRY_URL}/${IMAGE_NAMESPACE}/${svc}:${IMAGE_TAG} src/${svc}
-              docker push ${REGISTRY_URL}/${IMAGE_NAMESPACE}/${svc}:${IMAGE_TAG}
-            """
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub-creds',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+
+          sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
+
+          script {
+            env.CHANGED_SERVICES.split(",").each { svc ->
+              sh """
+                docker build -t ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG} src/${svc}
+                docker push ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}
+              """
+            }
           }
         }
       }
     }
 
     /* =========================
-       Stage 5: Deploy
+       Stage 5: Deploy to GKE
        ========================= */
-    stage('Deploy') {
-      when {
-        expression { env.CHANGED_SERVICES?.trim() }
-      }
+    stage('Deploy to GKE') {
       steps {
-        script {
-          env.CHANGED_SERVICES.split(",").each { svc ->
-            sh """
-              sed -i '/image:/c\\  image: ${REGISTRY_URL}/${IMAGE_NAMESPACE}/${svc}:${IMAGE_TAG}' \
-              kubernetes-manifests/${svc}.yaml
+        withCredentials([file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')]) {
+          script {
+            env.CHANGED_SERVICES.split(",").each { svc ->
+              sh """
+                sed -i '/image:/c\\  image: ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}' \
+                kubernetes-manifests/${svc}.yaml
 
-              kubectl apply -f kubernetes-manifests/${svc}.yaml -n ${KUBE_NAMESPACE}
-            """
+                kubectl apply -f kubernetes-manifests/${svc}.yaml -n ${KUBE_NAMESPACE}
+              """
+            }
           }
         }
       }
@@ -151,14 +127,10 @@ pipeline {
        Stage 6: Validate
        ========================= */
     stage('Validate') {
-      when {
-        expression { env.CHANGED_SERVICES?.trim() }
-      }
       steps {
-        script {
-          env.CHANGED_SERVICES.split(",").each { svc ->
-            sh "kubectl rollout status deployment/${svc} -n ${KUBE_NAMESPACE}"
-          }
+        withCredentials([file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')]) {
+          sh "kubectl get pods -n ${KUBE_NAMESPACE}"
+          sh "kubectl get svc -n ${KUBE_NAMESPACE}"
         }
       }
     }
