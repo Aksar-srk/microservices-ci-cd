@@ -23,23 +23,33 @@ pipeline {
     }
 
     /* =========================
-       Stage 2: Detect Services
+       Stage 2: Detect Dockerized Services
        ========================= */
-    stage('Detect Services') {
+    stage('Detect Dockerized Services') {
       steps {
         script {
           env.SERVICES = sh(
-            script: "ls src",
+            script: '''
+              for d in src/*; do
+                if [ -f "$d/Dockerfile" ]; then
+                  basename "$d"
+                fi
+              done
+            ''',
             returnStdout: true
           ).trim().replaceAll("\\s+", ",")
 
-          echo "Services detected: ${env.SERVICES}"
+          if (!env.SERVICES) {
+            error "❌ No Dockerized services found"
+          }
+
+          echo "Dockerized services: ${env.SERVICES}"
         }
       }
     }
 
     /* =========================
-       Stage 3: Docker Build & Push (BUILDx ONLY)
+       Stage 3: Docker Build & Push
        ========================= */
     stage('Docker Build & Push') {
       steps {
@@ -55,7 +65,6 @@ pipeline {
             set -e
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
 
-            # Create builder if not exists
             docker buildx inspect jenkins-builder >/dev/null 2>&1 || \
               docker buildx create --name jenkins-builder --use
 
@@ -91,7 +100,6 @@ pipeline {
         ]) {
 
           sh '''
-            set -e
             kubectl get ns ${KUBE_NAMESPACE} || kubectl create ns ${KUBE_NAMESPACE}
           '''
 
