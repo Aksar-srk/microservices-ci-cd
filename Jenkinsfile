@@ -2,9 +2,12 @@ pipeline {
   agent any
 
   environment {
-    DOCKERHUB_USERNAME = "aksarsr"     // 👈 your Docker Hub username
+    DOCKERHUB_USERNAME = "aksarsr"
     IMAGE_TAG          = "${BUILD_NUMBER}"
     KUBE_NAMESPACE     = "online-boutique"
+
+    // 🔥 REQUIRED for Online Boutique Dockerfiles
+    DOCKER_BUILDKIT    = "1"
   }
 
   options {
@@ -33,7 +36,7 @@ pipeline {
             returnStdout: true
           ).trim().split("\n").join(",")
 
-          echo "Services: ${env.SERVICES}"
+          echo "Services detected: ${env.SERVICES}"
         }
       }
     }
@@ -43,18 +46,26 @@ pipeline {
        ========================= */
     stage('Docker Build & Push') {
       steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'dockerhub-creds',
-          usernameVariable: 'DOCKER_USER',
-          passwordVariable: 'DOCKER_PASS'
-        )]) {
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'dockerhub-creds',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+          )
+        ]) {
 
-          sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
+          // ✅ SAFE docker login (no Groovy interpolation)
+          sh '''
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+          '''
 
           script {
             env.SERVICES.split(",").each { svc ->
               sh """
+                echo "Building image for ${svc}"
+
                 docker build \
+                  --platform=linux/amd64 \
                   -t ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG} \
                   src/${svc}
 
@@ -71,12 +82,21 @@ pipeline {
        ========================= */
     stage('Deploy to GKE') {
       steps {
-        withCredentials([file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')]) {
+        withCredentials([
+          file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')
+        ]) {
+
+          sh '''
+            kubectl get ns ${KUBE_NAMESPACE} || kubectl create ns ${KUBE_NAMESPACE}
+          '''
+
           script {
             env.SERVICES.split(",").each { svc ->
               sh """
-                sed -i '/image:/c\\  image: ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}' \
-                kubernetes-manifests/${svc}.yaml
+                echo "Deploying ${svc}"
+
+                sed -i 's|image:.*|image: ${DOCKERHUB_USERNAME}/online-boutique-${svc}:${IMAGE_TAG}|' \
+                  kubernetes-manifests/${svc}.yaml
 
                 kubectl apply -f kubernetes-manifests/${svc}.yaml -n ${KUBE_NAMESPACE}
               """
@@ -91,9 +111,13 @@ pipeline {
        ========================= */
     stage('Validate') {
       steps {
-        withCredentials([file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')]) {
-          sh "kubectl get pods -n ${KUBE_NAMESPACE}"
-          sh "kubectl get svc -n ${KUBE_NAMESPACE}"
+        withCredentials([
+          file(credentialsId: 'gke-kubeconfig', variable: 'KUBECONFIG')
+        ]) {
+          sh '''
+            kubectl get pods -n ${KUBE_NAMESPACE}
+            kubectl get svc -n ${KUBE_NAMESPACE}
+          '''
         }
       }
     }
@@ -101,10 +125,10 @@ pipeline {
 
   post {
     success {
-      echo "CI/CD pipeline completed successfully"
+      echo "✅ CI/CD pipeline completed successfully"
     }
     failure {
-      echo "CI/CD pipeline failed"
+      echo "❌ CI/CD pipeline failed"
     }
     always {
       cleanWs()
