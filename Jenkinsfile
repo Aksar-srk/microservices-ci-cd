@@ -6,11 +6,11 @@ pipeline {
     IMAGE_NAMESPACE = "online-boutique"
     IMAGE_TAG       = "${BUILD_NUMBER}"
     KUBE_NAMESPACE  = "default"
+    CHANGED_SERVICES = ""
   }
 
   options {
     timestamps()
-    ansiColor('xterm')
   }
 
   stages {
@@ -51,24 +51,26 @@ pipeline {
             }
           }
 
-          services = services.unique()
+          services = services.unique().findAll { it }
 
           if (services.isEmpty()) {
-            echo "No service changes detected. Exiting pipeline."
-            currentBuild.result = 'SUCCESS'
-            return
+            echo "No service changes detected. Pipeline will exit successfully."
+            env.CHANGED_SERVICES = ""
+          } else {
+            env.CHANGED_SERVICES = services.join(",")
+            echo "Services to build: ${env.CHANGED_SERVICES}"
           }
-
-          env.CHANGED_SERVICES = services.join(",")
-          echo "Services to build: ${env.CHANGED_SERVICES}"
         }
       }
     }
 
     /* =========================
-       Stage 3: Build & Test (PARALLEL - FIXED)
+       Stage 3: Build & Test
        ========================= */
     stage('Build & Test') {
+      when {
+        expression { env.CHANGED_SERVICES?.trim() }
+      }
       steps {
         script {
           def branches = [:]
@@ -109,6 +111,9 @@ pipeline {
        Stage 4: Docker Build & Push
        ========================= */
     stage('Docker Build & Push') {
+      when {
+        expression { env.CHANGED_SERVICES?.trim() }
+      }
       steps {
         script {
           env.CHANGED_SERVICES.split(",").each { svc ->
@@ -122,13 +127,15 @@ pipeline {
     }
 
     /* =========================
-       Stage 5: Deploy to Kubernetes
+       Stage 5: Deploy
        ========================= */
     stage('Deploy') {
+      when {
+        expression { env.CHANGED_SERVICES?.trim() }
+      }
       steps {
         script {
           env.CHANGED_SERVICES.split(",").each { svc ->
-
             sh """
               sed -i '/image:/c\\  image: ${REGISTRY_URL}/${IMAGE_NAMESPACE}/${svc}:${IMAGE_TAG}' \
               kubernetes-manifests/${svc}.yaml
@@ -141,9 +148,12 @@ pipeline {
     }
 
     /* =========================
-       Stage 6: Validate Deployment
+       Stage 6: Validate
        ========================= */
     stage('Validate') {
+      when {
+        expression { env.CHANGED_SERVICES?.trim() }
+      }
       steps {
         script {
           env.CHANGED_SERVICES.split(",").each { svc ->
